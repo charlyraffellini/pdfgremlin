@@ -13,7 +13,13 @@ lazy val root = (project in file("."))
     libraryDependencies += "org.python" % "jython-standalone" % "2.7.2",
     libraryDependencies += "org.pygments" % "pygments" % "2.5.2" % "runtime",
     libraryDependencies += "org.typelevel" %% "cats-effect" % "3.4.8",
-    libraryDependencies += "org.apache.pdfbox" % "pdfbox" % "2.0.27"
+    libraryDependencies += "org.apache.pdfbox" % "pdfbox" % "2.0.27",
+    libraryDependencies += "org.commonmark" % "commonmark" % "0.21.0"
   )
+
+assemblyMergeStrategy in assembly := {
+    case PathList("META-INF", xs @ _*) => MergeStrategy.discard
+    case x => MergeStrategy.first
+}
 
 // See https://www.scala-sbt.org/1.x/docs/Using-Sonatype.html for instructions on how to publish to Sonatype.
