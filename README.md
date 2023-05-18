@@ -1,8 +1,8 @@
 # PdfGremlin
 
-## Utility app that highlight and convert to pdf an entire folder
+## Utility app which highlights and merges as pdf an entire project or package
 
-### Currently only supports
+### Languages supported
 
 - scala
 - java
