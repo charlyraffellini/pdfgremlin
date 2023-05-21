@@ -51,35 +51,75 @@ object PdfGremlin extends IOApp.Simple {
     m.mergeDocuments()
   })
 
-  def toHtml(interpreter: PythonInterpreter, code: String): String = {
+  /***
+   * Supported Lexers https://pygments.org/languages/
+   *
+   * @param interpreter
+   * @param lang
+   * @tparam T
+   * @return
+   */
+  def toHtml[T <: Lang : scala.reflect.ClassTag](interpreter: PythonInterpreter, lang: T): Html = {
     val codeVarName = "code"
     val resultValName = "result"
 
-    interpreter.set(codeVarName, code)
+    println(s"Converting to html ${lang.path}")
 
-    interpreter.exec(
-      s"""
-        |from pygments import highlight
-        |from pygments.lexers.jvm import ScalaLexer
-        |from pygments.formatters import HtmlFormatter
-        |from pygments.styles import get_style_by_name
-        |$resultValName = highlight($codeVarName, ScalaLexer(), HtmlFormatter(full=True,style='xcode'))
-        |""".stripMargin
-    )
+    interpreter.set(codeVarName, lang.txt)
 
-    interpreter.get(resultValName, classOf[String])
+    val (lexerPackage, lexer) = lang match {
+      case _: Java => ("pygments.lexers.jvm", "JavaLexer")
+      case _: Markdown => ("pygments.lexers.markup", "MarkdownLexer")
+      case _: Python => ("pygments.lexers.python", "PythonLexer")
+      case _: Scala => ("pygments.lexers.jvm", "ScalaLexer")
+      case _ => throw new IllegalArgumentException(s"Lexer not supported for language ${implicitly[scala.reflect.ClassTag[T]].toString()}")
+    }
+
+    val interpreted = Try {
+      interpreter.exec(
+        s"""
+          |import sys
+          |sys.setrecursionlimit(8000)
+          |from pygments import highlight
+          |from $lexerPackage import $lexer
+          |from pygments.formatters import HtmlFormatter
+          |from pygments.styles import get_style_by_name
+          |$resultValName = highlight($codeVarName, $lexer(), HtmlFormatter(full=True,style='xcode'))
+          |""".stripMargin
+      )
+      interpreter.get(resultValName, classOf[String])
+    }.toEither
+
+    val html = interpreted match {
+      case Left(value) => {
+        println(s"There was an error coloring ${lang.path}. Will continue without coloring: ${value.getMessage}")
+        s"""
+           |<html>
+           |  <body>
+           |    <div class="title">
+           |      ${lang.txt}
+           |    </div>
+           |  </body>
+           |</html>
+           |
+           |""".stripMargin
+      }
+      case Right(value) => value
+    }
+
+    Html(html, lang.path)
   }
 
-  def mdToHtml(markdown: String): String = {
-    import org.commonmark.node._
-    import org.commonmark.parser.Parser
-    import org.commonmark.renderer.html.HtmlRenderer
-
-    val parser: Parser = Parser.builder().build()
-    val document: Node = parser.parse(markdown)
-    val renderer: HtmlRenderer = HtmlRenderer.builder().build()
-    renderer.render(document)
-  }
+//  def mdToHtml(markdown: String): String = {
+//    import org.commonmark.node._
+//    import org.commonmark.parser.Parser
+//    import org.commonmark.renderer.html.HtmlRenderer
+//
+//    val parser: Parser = Parser.builder().build()
+//    val document: Node = parser.parse(markdown)
+//    val renderer: HtmlRenderer = HtmlRenderer.builder().build()
+//    renderer.render(document)
+//  }
 
   def htmlToPdf(html: String) = {
     val b = new ByteArrayOutputStream
@@ -106,17 +146,14 @@ object PdfGremlin extends IOApp.Simple {
     htmlToPdf(page)
   }
 
-  def mergeFile(merger: PDFMergerUtility)(path: Path, htmlDoc: String): IO[Unit] = {
-    IO.println("Merging " + path.toAbsolutePath.toString) >>
-    IO(merger.addSource(new ByteArrayInputStream(titleToPdf(path.toString)))) >>
-    IO(merger.addSource(new ByteArrayInputStream(htmlToPdf(htmlDoc))))
+  def mergeFile(merger: PDFMergerUtility)(html: Html): IO[Unit] = {
+    IO.println("Merging " + html.file) >>
+    IO(merger.addSource(new ByteArrayInputStream(titleToPdf(html.file)))) >>
+    IO(merger.addSource(new ByteArrayInputStream(htmlToPdf(html.txt))))
   }
 
-  def toHtml(path: Path): IO[String] =
-    file(path.toAbsolutePath.toString).use(buffer => IO(mdToHtml(buffer.mkString)))
-
-  def toHtml(interpreter: PythonInterpreter, path: Path): IO[String] =
-    file(path.toAbsolutePath.toString).use(buffer => IO(toHtml(interpreter, buffer.mkString)))
+//  def toHtml(path: Path): IO[String] =
+//    file(path.toAbsolutePath.toString).use(buffer => IO(mdToHtml(buffer.mkString)))
 
   def files(folder: String, supportedFiles: List[String]): IO[List[Path]] = IO {
     import scala.collection.JavaConverters._
@@ -137,6 +174,10 @@ object PdfGremlin extends IOApp.Simple {
       case Success(v) => Option(v)
     }
 
+  def toLang[T <: Lang : Maker](path: File): IO[T] =
+    file(path.getAbsolutePath).use(b => IO(b.mkString)).map(t => implicitly[Maker[T]].instance(t, path))
+
+  import com.pdfgremlin.LangInstances._
   def program(folderPath: String, outputFile: String) = (
     for {
       inter <- pynterpreter()
@@ -146,18 +187,23 @@ object PdfGremlin extends IOApp.Simple {
   ).use { case (inter, merger) => {
       for {
         sFiles <- files(folderPath, ".scala" :: ".java" :: Nil)
+        pyFiles <- files(folderPath, ".py" :: Nil)
         mdFiles <- files(folderPath, ".md" :: Nil)
-        sHtml <- sFiles.traverse(f => toHtml(inter, f).map(f -> _))
-        mdHtml <- mdFiles.traverse(f => toHtml(f).map(f -> _))
-        _ <- IO.println(sFiles ++ mdFiles)
-        v <- (mdHtml ++ sHtml).traverse(t => mergeFile(merger)(t._1, t._2))
+        scalas <- sFiles.traverse(f => toLang[Scala](f.toFile))
+        pys <- pyFiles.traverse(f => toLang[Python](f.toFile))
+        mds <- mdFiles.traverse(f => toLang[Markdown](f.toFile))
+        sHtmls <- scalas.traverse(l => IO(toHtml(inter, l)))
+        pyHtmls <- pys.traverse(l => IO(toHtml(inter, l)))
+        mdHtmls <- mds.traverse(l => IO(toHtml(inter, l)))
+        _ <- IO.println(pyFiles ++ sFiles ++ mdFiles)
+        v <- (mdHtmls ++ sHtmls ++ pyHtmls).traverse(mergeFile(merger))
       } yield v
     }
   }
 
   /***
    * How to run it:
-   * 
+   *
    *  sbt assembly
    *
    * java -Dpdfgremlin.input.folder=/Users/carlos.raffellini/src/myproject -Dpdfgremlin.output.prefix=com.raffellini.myproject -cp target/scala-2.12/pdfgremlin-assembly-0.1.0-SNAPSHOT.jar com.pdfgremlin.PdfGremlin
@@ -167,3 +213,27 @@ object PdfGremlin extends IOApp.Simple {
       .flatMapN(program).void
   }
 }
+
+
+sealed trait Lang {
+  def txt: String
+  def path: String
+}
+case class Scala(txt: String, path: String) extends Lang
+case class Markdown(txt: String, path: String) extends Lang
+case class Python(txt: String, path: String) extends Lang
+case class Java(txt: String, path: String) extends Lang
+
+object LangInstances {
+  implicit lazy val scalaMakerInstance: Maker[Scala] = (txt: String, file: java.io.File) => Scala(txt, file.getAbsolutePath)
+
+  implicit lazy val pythonMakerInstance: Maker[Python] = (txt: String, file: java.io.File) => Python(txt, file.getAbsolutePath)
+
+  implicit lazy val markdownMakerInstance: Maker[Markdown] = (txt: String, file: java.io.File) => Markdown(txt, file.getAbsolutePath)
+}
+
+abstract class Maker[+T <: Lang] {
+  def instance(txt: String, file: java.io.File): T
+}
+
+case class Html(txt: String, file: String)
