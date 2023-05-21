@@ -6,6 +6,7 @@
 
 - scala
 - java
+- python
 - markdown
 
 How to run it:
